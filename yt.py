@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, re, json
+import requests, re, json, os, random
 from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
@@ -30,6 +30,39 @@ def handle_global_exception(e):
 # =========================
 # HELPERS
 # =========================
+def get_headers():
+    client_ip = request.headers.get('x-forwarded-for')
+    if client_ip:
+        client_ip = client_ip.split(',')[0].strip()
+    else:
+        client_ip = request.headers.get('x-real-ip', request.remote_addr)
+
+    if not client_ip or client_ip in ['127.0.0.1', 'localhost', '::1']:
+        client_ip = f"{random.randint(73, 76)}.{random.randint(10, 200)}.{random.randint(10, 200)}.{random.randint(1, 254)}"
+
+    return {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'referer': 'https://vidssave.com/',
+        'origin': 'https://vidssave.com',
+        'content-type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-For': client_ip,
+        'X-Real-IP': client_ip,
+        'Client-IP': client_ip,
+        'True-Client-IP': client_ip,
+        'CF-Connecting-IP': client_ip
+    }
+
+
+def get_proxies():
+    proxy_url = os.environ.get('PROXY_URL')
+    if proxy_url:
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+    return None
+
+
 def extract_video_id(url):
     if "youtu.be" in url:
         return url.split("/")[-1].split("?")[0]
@@ -122,15 +155,11 @@ def download():
         'origin': 'source',
         'link': full_yt_url
     }
-    headers = {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'referer': 'https://vidssave.com/',
-        'origin': 'https://vidssave.com',
-        'content-type': 'application/x-www-form-urlencoded'
-    }
+    headers = get_headers()
+    proxies = get_proxies()
 
     try:
-        api_res = requests.post(api_url, data=payload, headers=headers, timeout=15)
+        api_res = requests.post(api_url, data=payload, headers=headers, proxies=proxies, timeout=15)
         api_res.raise_for_status()
         api_data = api_res.json()
     except Exception as e:
@@ -228,7 +257,7 @@ def download():
             'no_encrypt': 1
         }
         try:
-            dl_res = requests.post(download_api_url, data=download_payload, headers=headers, timeout=12)
+            dl_res = requests.post(download_api_url, data=download_payload, headers=headers, proxies=proxies, timeout=12)
             dl_res.raise_for_status()
             task_id = dl_res.json().get("data", {}).get("task_id")
         except Exception as e:
@@ -251,7 +280,7 @@ def download():
         }
         
         try:
-            sse_res = requests.get(sse_url, params=params, headers=headers_sse, stream=True, timeout=20)
+            sse_res = requests.get(sse_url, params=params, headers=headers_sse, stream=True, proxies=proxies, timeout=20)
             sse_res.raise_for_status()
             
             current_event = None
@@ -310,15 +339,11 @@ def info():
         'origin': 'source',
         'link': full_yt_url
     }
-    headers = {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'referer': 'https://vidssave.com/',
-        'origin': 'https://vidssave.com',
-        'content-type': 'application/x-www-form-urlencoded'
-    }
+    headers = get_headers()
+    proxies = get_proxies()
 
     try:
-        api_res = requests.post(api_url, data=payload, headers=headers, timeout=15)
+        api_res = requests.post(api_url, data=payload, headers=headers, proxies=proxies, timeout=15)
         api_res.raise_for_status()
         api_data = api_res.json()
     except Exception as e:
