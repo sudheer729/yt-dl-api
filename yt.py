@@ -159,15 +159,16 @@ def base_ydl_opts():
 # ==========================================
 QUALITY_MAP = {
     # Prioritize progressive (video + audio in one file) for 360p, 480p, and 720p
-    "360p":   "best[height<=360][ext=mp4]/best[height<=360]/bestvideo[height<=360]",
-    "480p":   "best[height<=480][ext=mp4]/best[height<=480]/bestvideo[height<=480]",
-    "720p":   "best[height<=720][ext=mp4]/best[height<=720]/bestvideo[height<=720]",
+    # Adding /best fallback at the end of each selector ensures yt-dlp will never fail if the target DASH/progressive is missing (e.g. for YouTube Shorts or legacy videos)
+    "360p":   "best[height<=360][ext=mp4]/best[height<=360]/bestvideo[height<=360]/best",
+    "480p":   "best[height<=480][ext=mp4]/best[height<=480]/bestvideo[height<=480]/best",
+    "720p":   "best[height<=720][ext=mp4]/best[height<=720]/bestvideo[height<=720]/best",
     # 1080p and higher are always video-only (DASH) on YouTube and require separate audio URLs
-    "1080p":  "bestvideo[height<=1080][ext=mp4]/bestvideo[height<=1080]",
-    "1440p":  "bestvideo[height<=1440]",
-    "2160p":  "bestvideo[height<=2160]",
-    "4320p":  "bestvideo[height<=4320]",
-    "best":   "bestvideo[ext=mp4]/bestvideo",
+    "1080p":  "bestvideo[height<=1080][ext=mp4]/bestvideo[height<=1080]/best",
+    "1440p":  "bestvideo[height<=1440]/best",
+    "2160p":  "bestvideo[height<=2160]/best",
+    "4320p":  "bestvideo[height<=4320]/best",
+    "best":   "bestvideo[ext=mp4]/bestvideo/best",
 }
 
 # =========================
@@ -331,7 +332,7 @@ def download():
     ydl_opts = base_ydl_opts()
     
     if mode == "audio":
-        ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio"
+        ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
     else:
         fmt = QUALITY_MAP.get(quality, QUALITY_MAP["best"])
         ydl_opts["format"] = fmt
