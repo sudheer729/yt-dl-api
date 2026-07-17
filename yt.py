@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, re, json, time, hashlib, hmac
-import cloudscraper
+import requests, re, json
 from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
@@ -51,9 +50,54 @@ def pick_default_quality(available, default):
     return str(available[-1])
 
 
+def strip_key(obj, key_to_remove):
+    if isinstance(obj, dict):
+        if key_to_remove in obj:
+            del obj[key_to_remove]
+        for k, v in list(obj.items()):
+            strip_key(v, key_to_remove)
+    elif isinstance(obj, list):
+        for item in obj:
+            strip_key(item, key_to_remove)
+
+
 # =========================
 # API ROUTE
 # =========================
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "Message": "Welcome to YouTube Downloader API",
+        "Developer": "t.me/Sudhirxd",
+        "Website": "www.sudhirxd.in",
+        "Github": "www.github.com/sudheer729",
+        "Endpoints": {
+            "/": {
+                "method": "GET",
+                "description": "Show list of all available API endpoints"
+            },
+            "/info": {
+                "method": "GET",
+                "description": "Get metadata and immediate direct download links for a YouTube video",
+                "parameters": {
+                    "url": "Required. Full YouTube video link"
+                },
+                "example": "/info?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            },
+            "/download": {
+                "method": "GET",
+                "description": "Get a direct download URL for video (MP4) or audio (MP3) in a specific quality",
+                "parameters": {
+                    "url": "Required. Full YouTube video link",
+                    "type": "Required. 'mp3' or 'mp4'",
+                    "quality": "Optional. Target quality (e.g. '720p', '1080p' for video; '128kbps', '256kbps' for audio)"
+                },
+                "example": "/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&type=mp3"
+            }
+        }
+    })
+
+
 @app.route("/download", methods=["GET"])
 def download():
     yt_url = request.args.get("url")
@@ -67,231 +111,179 @@ def download():
     if not video_id:
         return jsonify({"error": "Invalid YouTube URL - couldn't extract video ID"}), 400
 
-    default_quality = 320 if mode == "mp3" else 1080
+    # Ensure URL is full link
+    full_yt_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    scraper = cloudscraper.create_scraper()
-    base_url = 'https://embed.dlsrv.online'
-    
+    # Call Vidssave API
+    api_url = 'https://api.vidssave.com/api/contentsite_api/media/parse'
+    payload = {
+        'auth': '20250901majwlqo',
+        'domain': 'api-ak.vidssave.com',
+        'origin': 'source',
+        'link': full_yt_url
+    }
     headers = {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
-        'origin': base_url,
-        'referer': f'{base_url}/v1/full?videoId={video_id}'
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'referer': 'https://vidssave.com/',
+        'origin': 'https://vidssave.com',
+        'content-type': 'application/x-www-form-urlencoded'
     }
 
-    # =======================================================
-    # STEP 1: FETCH VIDEO FORMAT INFO (UNAUTHENTICATED)
-    # =======================================================
     try:
-        info_res = scraper.post(f'{base_url}/api/info', json={'videoId': video_id}, headers=headers, timeout=12)
-        info_res.raise_for_status()
-        info_data = info_res.json()
+        api_res = requests.post(api_url, data=payload, headers=headers, timeout=15)
+        api_res.raise_for_status()
+        api_data = api_res.json()
     except Exception as e:
         return jsonify({
             "error": "Failed to fetch format details from backend",
             "details": str(e)
         }), 502
 
-    if info_data.get("status") == "error" or "info" not in info_data:
+    if api_data.get("status") != 1 or "data" not in api_data:
         return jsonify({
             "error": "Downstream service returned error or invalid format information",
-            "response": info_data
+            "response": api_data
         }), 502
 
-    title = info_data.get("info", {}).get("title", "Unknown Video")
-    formats = info_data.get("info", {}).get("formats", [])
+    video_info = api_data.get("data", {})
+    title = video_info.get("title", "Unknown Video")
+    resources = video_info.get("resources", [])
 
-    # =======================================================
-    # STEP 2: QUALITY & FORMAT RESOLUTION
-    # =======================================================
-    download_format = ""
+    if not resources:
+        return jsonify({"error": "No formats or download options found for this video"}), 502
+
+    download_url = ""
     download_quality = ""
 
+    target_res = None
     if mode == "mp3":
-        # Find audio formats (typically m4a, opus)
-        audio_formats = [f for f in formats if f.get("type") == "audio"]
-        if not audio_formats:
-            return jsonify({"error": "No audio formats found for this video"}), 502
-        
-        # Default to m4a or search for preferred format if specified in req_quality
-        download_format = "m4a"
-        if req_quality and any(f.get("format") == req_quality for f in audio_formats):
-            download_format = req_quality
-        else:
-            # Fallback to whatever audio format is available
-            download_format = audio_formats[0].get("format", "m4a")
+        audio_resources = [r for r in resources if r.get("type") == "audio" and r.get("format") == "MP3"]
+        if not audio_resources:
+            return jsonify({"error": "No MP3 audio formats found for this video"}), 502
             
-        download_quality = ""  # Not used for audio download payloads
-    else:
-        # Find video format qualities
-        video_formats = [f for f in formats if f.get("type") == "video" and f.get("format") == "mp4"]
-        if not video_formats:
-            return jsonify({"error": "No MP4 video formats found for this video"}), 502
+        if req_quality:
+            req_q_clean = re.sub(r'\D', '', req_quality)
+            if req_q_clean:
+                for r in audio_resources:
+                    q_digits = re.sub(r'\D', '', r.get("quality", ""))
+                    if q_digits == req_q_clean:
+                        target_res = r
+                        break
         
-        # Extract quality digits (e.g. '1080p' -> '1080')
-        available_qualities = []
-        for f in video_formats:
-            q = f.get("quality", "")
+        if not target_res:
+            def get_audio_quality_num(r):
+                q_digits = re.sub(r'\D', '', r.get("quality", ""))
+                return int(q_digits) if q_digits.isdigit() else 0
+            
+            audio_resources_sorted = sorted(audio_resources, key=get_audio_quality_num, reverse=True)
+            target_res = audio_resources_sorted[0]
+            
+        download_quality = target_res.get("quality")
+    else:
+        video_resources = [r for r in resources if r.get("type") == "video" and r.get("format") == "MP4"]
+        if not video_resources:
+            return jsonify({"error": "No MP4 video formats found for this video"}), 502
+            
+        avail_map = {}
+        for r in video_resources:
+            q = r.get("quality", "")
             m = re.match(r'(\d+)', q)
             if m:
-                available_qualities.append(m.group(1))
-
+                avail_map[m.group(1)] = r
+                
+        available_qualities = sorted(avail_map.keys(), key=int, reverse=True)
         if not available_qualities:
             return jsonify({"error": "Could not extract video quality options"}), 502
-
-        available_qualities = sorted(set(available_qualities), key=int, reverse=True)
-
+            
         if req_quality:
-            # Normalize requested quality (e.g., '1080p' -> '1080')
             req_q_clean = re.sub(r'\D', '', req_quality)
-            if req_q_clean not in available_qualities:
+            if req_q_clean in avail_map:
+                target_res = avail_map[req_q_clean]
+            else:
                 return jsonify({
                     "error": "Requested quality not available",
                     "requested": req_quality,
                     "available": [f"{q}p" for q in available_qualities]
                 }), 400
-            download_quality = req_q_clean
         else:
-            download_quality = pick_default_quality(available_qualities, default_quality)
-        
-        download_format = "mp4"
+            default_quality = 1080
+            picked_q = pick_default_quality(available_qualities, default_quality)
+            target_res = avail_map[picked_q]
+            
+        download_quality = target_res.get("quality")
 
-    # =======================================================
-    # STEP 3: SESSION VERIFICATION HANDSHAKE (ANTI-BOT BYPASS)
-    # =======================================================
-    # 3.1 Fetch initToken from HTML page
-    try:
-        page_res = scraper.get(f'{base_url}/v1/full?videoId={video_id}', headers=headers, timeout=12)
-        page_res.raise_for_status()
-    except Exception as e:
-        return jsonify({"error": "Failed to load session page", "details": str(e)}), 502
-
-    token_match = re.search(r'id="init-token"\s+data-token="([^"]+)"', page_res.text)
-    if not token_match:
-        return jsonify({"error": "Verification token parsing failed"}), 502
-    init_token = token_match.group(1)
-
-    # 3.2 Request PoW Challenge
-    try:
-        challenge_res = scraper.post(f'{base_url}/api/challenge', headers=headers, timeout=12)
-        challenge_res.raise_for_status()
-        challenge = challenge_res.json()
-    except Exception as e:
-        return jsonify({"error": "Failed to get session challenge", "details": str(e)}), 502
-
-    salt = challenge['salt']
-    ts = challenge['ts']
-    difficulty = challenge.get('difficulty', 3)
-
-    # 3.3 Solve PoW Challenge
-    prefix = '0' * difficulty
-    nonce = 0
-    pow_start = time.time()
-    max_loops = 500000
-    while nonce < max_loops:
-        data_str = f"{salt}:{ts}:{nonce}".encode('utf-8')
-        h = hashlib.sha256(data_str).hexdigest()
-        if h.startswith(prefix):
-            solved_nonce = str(nonce)
-            break
-        nonce += 1
-    else:
-        return jsonify({"error": "Proof of Work challenge calculation timed out"}), 500
-    
-    pow_time = int((time.time() - pow_start) * 1000)
-
-    # 3.4 Generate fingerprint & telemetry
-    fp_details = {
-        "ua": headers['user-agent'],
-        "lang": "en-US",
-        "langs": "en-US,en",
-        "screen": {"w": 1366, "h": 768, "cd": 24},
-        "tzOffset": "-330",
-        "tz": "Asia/Kolkata",
-        "hc": "8",
-        "dm": "8",
-        "chrome": "true",
-        "canvasHash": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAYAAACt"
-    }
-    fp_str = "|".join([
-        fp_details["ua"],
-        fp_details["lang"],
-        fp_details["langs"],
-        "1366x768x24",
-        "-330",
-        "Asia/Kolkata",
-        "8",
-        "8",
-        "true",
-        fp_details["canvasHash"]
-    ])
-    fp_hash = hashlib.sha256(fp_str.encode('utf-8')).hexdigest()
-
-    verify_payload = {
-        "initToken": init_token,
-        "fpHash": fp_hash,
-        "fpDetails": fp_details,
-        "salt": salt,
-        "ts": ts,
-        "signature": challenge['signature'],
-        "nonce": solved_nonce,
-        "telemetry": {
-            "interactions": 15,
-            "timeToVerify": max(50, pow_time)
-        }
-    }
-
-    # 3.5 Submit Verification
-    try:
-        verify_res = scraper.post(f'{base_url}/api/verify', headers={'Content-Type': 'application/json', **headers}, json=verify_payload, timeout=12)
-        verify_res.raise_for_status()
-        verify_data = verify_res.json()
-    except Exception as e:
-        return jsonify({"error": "Verification session handshake rejected", "details": str(e)}), 502
-
-    session_token = verify_data.get('token')
-    if not session_token:
-        return jsonify({"error": "Downstream verify response missing session token"}), 502
-
-    # =======================================================
-    # STEP 4: SIGN & REQUEST DOWNLOAD
-    # =======================================================
-    now_ms = str(int(time.time() * 1000))
-    key = session_token[-32:].encode('utf-8')
-    message = f"{now_ms}:{video_id}".encode('utf-8')
-    sig = hmac.new(key, message, hashlib.sha256).hexdigest()
-
-    download_headers = {
-        'Authorization': f'Bearer {session_token}',
-        'Content-Type': 'application/json',
-        'x-fp': fp_hash,
-        'x-ts': now_ms,
-        'x-sig': sig,
-        **headers
-    }
-
-    download_payload = {
-        "videoId": video_id,
-        "format": download_format,
-        "quality": download_quality
-    }
-
-    try:
-        download_res = scraper.post(f'{base_url}/api/download/{mode}', headers=download_headers, json=download_payload, timeout=15)
-        download_res.raise_for_status()
-        download_data = download_res.json()
-    except Exception as e:
-        return jsonify({"error": "Failed to request download link from downstream", "details": str(e)}), 502
-
-    download_url = download_data.get("url")
+    # Get the download URL (with SSE task polling fallback if empty)
+    download_url = target_res.get("download_url")
     if not download_url:
-        return jsonify({
-            "error": "Download URL missing from downstream response",
-            "raw_response": download_data
-        }), 502
+        resource_content = target_res.get("resource_content")
+        if not resource_content:
+            return jsonify({"error": "No download URL or resource content available for this format"}), 502
+            
+        download_api_url = 'https://api.vidssave.com/api/contentsite_api/media/download'
+        download_payload = {
+            'auth': '20250901majwlqo',
+            'domain': 'api-ak.vidssave.com',
+            'origin': 'source',
+            'request': resource_content,
+            'no_encrypt': 1
+        }
+        try:
+            dl_res = requests.post(download_api_url, data=download_payload, headers=headers, timeout=12)
+            dl_res.raise_for_status()
+            task_id = dl_res.json().get("data", {}).get("task_id")
+        except Exception as e:
+            return jsonify({"error": "Failed to initiate download task", "details": str(e)}), 502
+            
+        if not task_id:
+            return jsonify({"error": "Download task did not return a task ID"}), 502
+            
+        # Poll Server-Sent Events stream for completion
+        sse_url = "https://api.vidssave.com/sse/contentsite_api/media/download_query"
+        params = {
+            'task_id': task_id,
+            'download_domain': 'vidssave.com',
+            'origin': 'content_site',
+            'auth': '20250901majwlqo'
+        }
+        headers_sse = {
+            'Accept': 'text/event-stream',
+            **headers
+        }
+        
+        try:
+            sse_res = requests.get(sse_url, params=params, headers=headers_sse, stream=True, timeout=20)
+            sse_res.raise_for_status()
+            
+            current_event = None
+            resolved_link = None
+            
+            for line in sse_res.iter_lines():
+                if line:
+                    decoded = line.decode('utf-8').strip()
+                    if decoded.startswith("event:"):
+                        current_event = decoded.replace("event:", "").strip()
+                    elif decoded.startswith("data:"):
+                        data_str = decoded.replace("data:", "").strip()
+                        if current_event == "success":
+                            try:
+                                data_json = json.loads(data_str)
+                                resolved_link = data_json.get("download_link")
+                            except:
+                                pass
+                            break
+                        elif current_event == "failed":
+                            break
+                            
+            if resolved_link:
+                download_url = resolved_link
+            else:
+                return jsonify({"error": "Failed to retrieve download link from downstream conversion task"}), 502
+        except Exception as e:
+            return jsonify({"error": "Error while waiting for download link generation", "details": str(e)}), 502
 
     return jsonify({
         "Title": title,
-        "Quality": f"{download_quality}p" if download_quality else download_format,
+        "Quality": download_quality,
         "Download Link": download_url,
         "Developer": "t.me/Sudhirxd",
         "Website": "www.sudhirxd.in",
@@ -299,8 +291,71 @@ def download():
     })
 
 
+@app.route("/info", methods=["GET"])
+def info():
+    yt_url = request.args.get("url")
+    if not yt_url:
+        return jsonify({"error": "Invalid parameters", "required": "url"}), 400
+
+    video_id = extract_video_id(yt_url)
+    if not video_id:
+        return jsonify({"error": "Invalid YouTube URL - couldn't extract video ID"}), 400
+
+    full_yt_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    api_url = 'https://api.vidssave.com/api/contentsite_api/media/parse'
+    payload = {
+        'auth': '20250901majwlqo',
+        'domain': 'api-ak.vidssave.com',
+        'origin': 'source',
+        'link': full_yt_url
+    }
+    headers = {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'referer': 'https://vidssave.com/',
+        'origin': 'https://vidssave.com',
+        'content-type': 'application/x-www-form-urlencoded'
+    }
+
+    try:
+        api_res = requests.post(api_url, data=payload, headers=headers, timeout=15)
+        api_res.raise_for_status()
+        api_data = api_res.json()
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to fetch format details from backend",
+            "details": str(e)
+        }), 502
+
+    if api_data.get("status") != 1 or "data" not in api_data:
+        return jsonify({
+            "error": "Downstream service returned error or invalid format information",
+            "response": api_data
+        }), 502
+
+    video_data = api_data.get("data", {})
+    
+    # Filter out formats that do not have a download URL immediately available (empty)
+    resources = video_data.get("resources", [])
+    filtered_resources = [r for r in resources if r.get("download_url")]
+    video_data["resources"] = filtered_resources
+    
+    # Recursively strip resource_content to keep the JSON output clean and lightweight
+    strip_key(video_data, "resource_content")
+
+    response_data = {
+        "status": 1,
+        "status_code": "success",
+        "data": video_data,
+        "Developer": "t.me/Sudhirxd",
+        "Website": "www.sudhirxd.in",
+        "Github": "www.github.com/sudheer729"
+    }
+    return jsonify(response_data)
+
+
 # =========================
 # RUN (TERMUX SAFE)
 # =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
