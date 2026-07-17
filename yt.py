@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 import yt_dlp
 import os
 import time
+import tempfile
+import shutil
 from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
@@ -9,19 +11,27 @@ app = Flask(__name__)
 # ==========================================
 # CONFIG & VERCEL COOKIES
 # ==========================================
-# Check for cookies via YOUTUBE_COOKIES environment variable (great for Vercel)
-# If found, write to /tmp/cookies.txt since Vercel has a read-only filesystem except /tmp
+# Vercel and serverless platforms have a read-only filesystem except for the temp folder.
+# Since yt-dlp attempts to write/save updated session cookies back to the cookie file,
+# we must host the active cookie file in a writable temp directory to prevent [Errno 30] errors.
+TEMP_DIR = tempfile.gettempdir()
+COOKIE_FILE = os.path.join(TEMP_DIR, "yt_api_cookies.txt")
+
 ENV_COOKIES = os.environ.get("YOUTUBE_COOKIES")
+LOCAL_COOKIE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
 if ENV_COOKIES:
-    COOKIE_FILE = "/tmp/cookies.txt"
     try:
         with open(COOKIE_FILE, "w", encoding="utf-8") as f:
             f.write(ENV_COOKIES)
     except Exception as e:
-        print(f"Failed to write environment cookies: {e}")
-        COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-else:
-    COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+        print(f"Failed to write environment cookies to temp: {e}")
+elif os.path.isfile(LOCAL_COOKIE_PATH):
+    try:
+        shutil.copy2(LOCAL_COOKIE_PATH, COOKIE_FILE)
+    except Exception as e:
+        print(f"Failed to copy local cookies.txt to temp: {e}")
+
 
 # ==========================================
 # IN-MEMORY CACHE (Avoid duplicate YouTube hits)
