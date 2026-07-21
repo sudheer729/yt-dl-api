@@ -1,4 +1,4 @@
-# YouTube Downloader API (yt-dlp Edition) 🚀
+# YouTube Downloader API 🚀
 
 A lightning-fast, Vercel-friendly, lightweight, and pure Python YouTube extractor API powered by `yt-dlp` and `Flask`.
 
